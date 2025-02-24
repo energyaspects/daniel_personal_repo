@@ -13,6 +13,8 @@ import plotly.graph_objects as go
 from scipy.signal import find_peaks, peak_prominences,peak_widths, chirp
 from plotly.subplots import make_subplots
 from scipy import integrate
+import os
+import re
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -24,23 +26,21 @@ class battery_model:
 
     def __init__(self):
         self.ISO = "ERCOT"
-        self.sd = datetime(2024, 1, 1)
-        self.ed = datetime(2024, 12, 31)
-        self.resolution = "5min"
-        self.width_slices = 0.01
+        self.sd = datetime(2025, 1, 1)
+        self.ed = datetime(2028, 12, 31)
+        self.resolution = "5min"  #options are "60min", "15min", "5min"
+        resolution_to_interval_map = {"60min": 1,"15min": 4,"5min": 12}
+        self.resolution_interval = resolution_to_interval_map.get(self.resolution, "String not found")
+        self.width_slices = 0.01 #DO NOT CHANGE FOR NOW
         self.round_trip_losses_percentage = 0.15
+        self.plot_charts = False
         self.runner()
 
+    #Extractors
     def get_thermal_call_sid_data(self):
 
-        #Define the sid depending on the region - please replace to plug into the na_gen model correctly
-        if self.ISO == "ERCOT":
-            thermal_call_query = r'=({{sid=teams\power\models\na_gen\ercot\generation_parameters\thermal_load_incl_curtailment}}/1000)@localize:America/Chicago' #call this thermal call in the future
-            #net_load_query = r'=({{sid=teams\power\models\na_gen\ercot\generation_parameters\load}}-{{sid=teams\power\models\na_gen\ercot\generation_parameters\solar_uncurtailed}}-{{sid=teams\power\models\na_gen\ercot\generation_parameters\wind_uncurtailed}})/1000@localize:America/Chicago' #call this thermal call in the future
-
-        if self.ISO == "CAISO":
-            thermal_call_query = r'=({{sid=teams\power\caiso\gen_mix_new\natural_gas}}/1000)@A:h@localize:America/Los_Angeles'
-
+        #Define thermal call SID
+        thermal_call_query = rf'sid=teams\power\models\na_gen\{self.ISO}\generation_parameters\thermal_call@localize:America/Chicago' #call this thermal call in the future
 
         #Pull data from SJ
         thermal_call = sj.sj.get_df(query=thermal_call_query, series_axis="columns", df=self.sd, dt=self.ed, max_points=-1, fields="series_id")
@@ -77,29 +77,24 @@ class battery_model:
         return battery_capacity
 
     def get_battery_duration_sid_data(self):
-        #THIS WILL BE REPLACED BY ACTUAL SIDs once I create them
 
-        if self.ISO == "ERCOT":
-            # Fudge some duration numbers for now...
-            # Create a DataFrame with 'day' column from 1 to 365
-            battery_duration = pd.DataFrame({'month': np.arange(1, 13)})
-            # Create a 'value' column that linearly increases from 1.1 to 1.5
-            battery_duration['duration'] = np.linspace(1.1, 1.5, num=12)
-            battery_duration['year'] = 2024
-
-        if self.ISO == "CAISO":
-            # Fudge some duration numbers for now...
-            # Create a DataFrame with 'day' column from 1 to 365
-            battery_duration = pd.DataFrame({'month': np.arange(1, 13)})
-            # Create a 'value' column that linearly increases from 1.1 to 1.5
-            battery_duration['duration'] = np.linspace(3.8, 4, num=12)
-            battery_duration['year'] = 2024
-
+        duration_sid = fr'sid=users\daniel.pyrek\power\models\na_gen\{self.ISO}\capacity_adj\battery_duration'
+        battery_duration = sj.sj.get_df(query=duration_sid, series_axis="columns", df=self.sd, dt=self.ed,max_points=-1, fields="series_id")
+        battery_duration.columns = ["duration"]
+        battery_duration['year'] =battery_duration.index.year
+        battery_duration['month'] = battery_duration.index.month
         return battery_duration
 
     def get_battery_ancillary_sid_data(self):
-        #THIS WILL BE REPLACED BY ACTUAL SIDs once I create them
 
+        battery_as_vol_sid = fr'sid=users\daniel.pyrek\power\models\na_gen\{self.ISO}\capacity_adj\battery_ancillary_capacity'
+        battery_as_vol = sj.sj.get_df(query=battery_as_vol_sid, series_axis="columns", df=self.sd, dt=self.ed,max_points=-1, fields="series_id")
+        battery_as_vol.columns = ["avg_bess_as_vol"]
+        battery_as_vol["avg_bess_as_vol"] = battery_as_vol["avg_bess_as_vol"]/1000
+        battery_as_vol['year'] = battery_as_vol.index.year
+        battery_as_vol['month'] = battery_as_vol.index.month
+
+        """
         if self.ISO == "ERCOT":
             #We have actual ancillary service data for batteries so can pull that
 
@@ -126,14 +121,8 @@ class battery_model:
             battery_as_vol["hour"] = battery_as_vol.index.hour
             battery_as_vol = battery_as_vol.groupby(['year','month','day','hour'])["avg_bess_as_vol"].mean().reset_index()
             battery_as_vol["avg_bess_as_vol"] = battery_as_vol["avg_bess_as_vol"]/1000
-
-        if self.ISO == "CAISO":
-            # Fudge some AS numbers for now...
-            # Create a DataFrame with 'day' column from 1 to 365
-            battery_as_vol = pd.DataFrame({'month': np.arange(1, 13)})
-            # Create a 'value' column that linearly increases from 1.1 to 1.5
-            battery_as_vol['avg_bess_as_vol'] = np.linspace(0.3, 0.3, num=12)
-            battery_as_vol['year'] = 2024
+            
+            """
 
         return battery_as_vol
 
@@ -155,22 +144,7 @@ class battery_model:
 
         return battery_gen_data
 
-    def OLDDatetimeToOrdinal(self,dt):
-        # Converts datetime time format to ordinal
-
-        # Convert numpy.datetime64 to Python datetime
-        if isinstance(dt, np.datetime64):
-            dt = dt.astype('M8[ms]').astype(datetime)
-
-        # Get the ordinal part from the date
-        ordinal = dt.toordinal()
-
-        # Calculate the fractional part of the day
-        time_fraction = (dt - datetime.combine(dt.date(), datetime.min.time())).total_seconds() / (24 * 3600)
-
-        # Combine the ordinal and fractional parts
-        return ordinal + time_fraction
-
+    #Helper functions that convert ordinal times to datetime and vice versa
     def DatetimeToOrdinal(self,dt):
         # Converts datetime to ordinal time format
         ordinal = dt.toordinal()
@@ -188,7 +162,17 @@ class battery_model:
         date_time = datetime.combine(plaindate, datetime.min.time())
         return date_time + timedelta(days=ordinal - int(ordinal))
 
-    def load_and_combine_all_data(self):
+    def ensure_no_negatives(self, df):
+        #Takes a dataframe with one column and ensures no values are negative
+        min_value = df.iloc[:, 0].min()
+
+        if min_value < 0:
+            df.iloc[:, 0] += abs(min_value)
+
+        return df
+
+    #Function that runs the extractors and merges them
+    def Extract_Merge(self):
         #Call all functions to pull data
         thermal_call_data = self.get_thermal_call_sid_data()
         logger.info(f'Pulled {len(thermal_call_data)} rows of thermal call data')
@@ -209,15 +193,15 @@ class battery_model:
         df = thermal_call_data.merge(battery_capacity_data)
         df = df.merge(battery_duration_data)
         df = df.merge(battery_ancillary_data)
-        df = df.merge(actual_battery_output_data)
+        #df = df.merge(actual_battery_output_data)
         logger.info(f'Merged all input data')
 
         #Calculate additional columns
         df["battery_gwh"] = df['duration'] * df['battery_capacity_cod'] #calculate raw battery gwh
         df["arb_bess_capacity"] = df["battery_capacity_cod"] - df["avg_bess_as_vol"] #calculate battery capacity able to arb
         df["arb_bess_gwh"] = df["battery_gwh"] - df["avg_bess_as_vol"] * df["duration"] #calculate battery arb gwh
-        df["total_battery_cf"] = df["actual_battery_gen"] / df["battery_capacity_cod"] #calculate total battery cf
-        df["arb_battery_cf"] = df["actual_battery_gen"] / df["arb_bess_capacity"] #calculate arb battery cf
+        #df["total_battery_cf"] = df["actual_battery_gen"] / df["battery_capacity_cod"] #calculate total battery cf
+        #df["arb_battery_cf"] = df["actual_battery_gen"] / df["arb_bess_capacity"] #calculate arb battery cf
         df['thermal_call_ramp'] = df['thermal_call'].diff() #calculate ramping - not needed but could be used in future
 
         #Clean up data and save df to self
@@ -227,6 +211,7 @@ class battery_model:
         self.input_data = df
         logger.info(f'Completed data ingestion')
 
+    #Components of the battery model and the runner
     def find_peaks(self, thermal_call_data):
         #takes datetime index and the associated data as series and calculates the peak data
         x = thermal_call_data.index
@@ -235,14 +220,19 @@ class battery_model:
         #map datetimes to ordinal number
         datetime_map = np.array([self.DatetimeToOrdinal(dt) for dt in x])
 
+        ############################# WE WILL LIKELY TUNE THIS P #############################
         # Find peaks and calculate prominences
-        peaks, peak_info = find_peaks(y,width=3,prominence=1.5)
+        peaks, peak_info = find_peaks(y, width=1, prominence=1.5)
+        #peaks, peak_info = find_peaks(y,width=1,prominence=1,distance=100)
+        #peaks, peak_info = find_peaks(y, width=3)
         prominences = peak_info['prominences']
         contour_heights = y[peaks] - prominences
 
         #calculate width information at varying heights of the prominences
         peaks_data = pd.DataFrame()
         rel_heights = np.arange(0, 1.0, self.width_slices)
+
+        ############################# WE COULD AVOID ALL rel_heights especially for the smaller areas #############################
         for rel_height in rel_heights:
             discharge_widths_raw = peak_widths(y, peaks, rel_height=rel_height)
             discharge_widths_raw = pd.DataFrame(discharge_widths_raw).transpose()
@@ -251,17 +241,17 @@ class battery_model:
             discharge_widths["left_ips"] = discharge_widths["left_ips"]#np.floor(discharge_widths["left_ips"])
             discharge_widths["right_ips"] = discharge_widths["right_ips"] #np.ceil(discharge_widths["right_ips"])
             discharge_intercepts = discharge_widths[['left_ips','right_ips']]
-            discharge_intercepts["left_ips"] = discharge_intercepts["left_ips"]/24/12 + datetime_map[0]
-            discharge_intercepts["right_ips"] = discharge_intercepts["right_ips"]/24/12 + datetime_map[0]
+            discharge_intercepts["left_ips"] = discharge_intercepts["left_ips"]/24/self.resolution_interval + datetime_map[0]
+            discharge_intercepts["right_ips"] = discharge_intercepts["right_ips"]/24/self.resolution_interval + datetime_map[0]
             discharge_intercepts["left_ips"] = np.array([self.OrdinalToDatetime(dt) for dt in discharge_intercepts["left_ips"]])
             discharge_intercepts["right_ips"] = np.array([self.OrdinalToDatetime(dt) for dt in discharge_intercepts["right_ips"]])
             discharge_intercepts["left_ips"] = discharge_intercepts["left_ips"].dt.floor(self.resolution)
             discharge_intercepts["right_ips"] = discharge_intercepts["right_ips"].dt.ceil(self.resolution)
             discharge_intercepts["prominence"] = prominences
             discharge_intercepts["height"] = prominences*rel_height
-            discharge_intercepts["width"] = discharge_widths_raw["widths"]/12
+            discharge_intercepts["width"] = discharge_widths_raw["widths"]/self.resolution_interval
             discharge_intercepts["width_height"] = discharge_widths_raw["width_heights"]
-            discharge_intercepts["peaks"] = peaks / 24 / 12 + datetime_map[0]
+            discharge_intercepts["peaks"] = peaks / 24 / self.resolution_interval + datetime_map[0]
             discharge_intercepts["peaks"] = np.array([self.OrdinalToDatetime(dt) for dt in discharge_intercepts["peaks"]])
             discharge_intercepts["peaks"]  = discharge_intercepts["peaks"].dt.round(self.resolution)
             discharge_intercepts["rel_height"] = rel_height
@@ -276,48 +266,49 @@ class battery_model:
         display_data = pd.DataFrame(y, x)
         display_data.index = pd.to_datetime(display_data.index)
         #display_data.reset_index(inplace=True)
-        peak_dates = peaks / 24 / 12 + datetime_map[0]
+        peak_dates = peaks / 24 / self.resolution_interval + datetime_map[0]
         peak_dates = np.array([self.OrdinalToDatetime(dt) for dt in peak_dates])
         peak_dates = pd.Series(peak_dates).dt.round(self.resolution)
-        #PLOT PEAKS
-        # Specify the date range you want to display
-        start_date = '2024-08-16'
-        end_date = '2024-08-24'
 
+        if self.plot_charts:
+            #PLOT PEAKS
+            # Specify the date range window that defaults in the display
+            start_date = '2024-08-16'
+            end_date = '2024-08-24'
 
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-        # Add the main line plot
-        fig.add_trace(go.Scatter(x=x, y=y, mode='lines', name='Signal', line=dict(color='rgba(0,71,171,1)')),
-                      secondary_y=False)
+            # Add the main line plot
+            fig.add_trace(go.Scatter(x=x, y=y, mode='lines', name='Signal', line=dict(color='rgba(0,71,171,1)')),
+                          secondary_y=False)
 
-        # Add vertical lines for peak prominences
-        for peak, contour_height in zip(peak_dates, contour_heights):
-            fig.add_trace(go.Scatter(
-                x=[peak, peak],
-                y=[contour_height, display_data.loc[peak][0]],
-                mode='lines',
-                line=dict(color='rgba(0,71,171,1)', dash='dot'),
-                showlegend=False),
-                secondary_y=False)
+            # Add vertical lines for peak prominences
+            for peak, contour_height in zip(peak_dates, contour_heights):
+                fig.add_trace(go.Scatter(
+                    x=[peak, peak],
+                    y=[contour_height, display_data.loc[peak][0]],
+                    mode='lines',
+                    line=dict(color='rgba(0,71,171,1)', dash='dot'),
+                    showlegend=False),
+                    secondary_y=False)
 
-        # Update layout
-        fig.update_layout(title='Signal with Peaks and Prominences',
-                          xaxis_title='X',
-                          yaxis_title='Amplitude',
-                          yaxis2_title='Battery Charge Factor',
-                          xaxis=dict(
-                              range=[start_date, end_date],  # Set the initial date range
-                              type='date'  # Ensure the x-axis is treated as a date axis
-                          ),
-                          )
+            # Update layout
+            fig.update_layout(title='Signal with Peaks and Prominences',
+                              xaxis_title='X',
+                              yaxis_title='Amplitude',
+                              yaxis2_title='Battery Charge Factor',
+                              xaxis=dict(
+                                  range=[start_date, end_date],  # Set the initial date range
+                                  type='date'  # Ensure the x-axis is treated as a date axis
+                              ),
+                              )
 
-        # Show the plot
-        fig.show()
+            # Show the plot
+            fig.show()
 
         return peaks_data
 
-    def integrate_peaks(self,peaks_data, thermal_call_data, power_requirements):
+    def integrate_peaks(self,peaks_data, thermal_call_data, power_requirements, duration_requirements):
 
         #Clean and merge peaks data and power requirements
         peaks_data["date"] = peaks_data.index.date
@@ -327,57 +318,75 @@ class battery_model:
 
         #Filter out scenarios where the model would dispatch the battery beyond its power limit
         peaks_data = peaks_data.loc[peaks_data['height'] <= peaks_data['arb_bess_capacity']]
+
         peaks_data.set_index("peaks", inplace=True)
         #prepare data and loop integrating the areas
         peak_dates = pd.Series(peaks_data.index.unique())
 
         peak_data_with_area = pd.DataFrame()
+
+
         #loop through each peak
         for peak in peak_dates:
-
             #Grab the scenarios for each peak
             peak_areas = []
             peak_data = peaks_data.loc[peak]
+            # Pull duration requirement
+            peak_date = peak_data['date'][0]
+            daily_duration_requirement = duration_requirements.loc[peak_date][0]
+            energy_limit_flag = True
             #peak_data = peak_data.reset_index(drop=True)
 
             #loop through each relative height
             for rel_height_row in peak_data["rel_height"]:
+                if energy_limit_flag: #If the code has not yet exceeded the total energy limit
 
-                #Find the start and end timestamp of the peak
-                left_ips = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'left_ips'].iloc[0]
-                right_ips = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'right_ips'].iloc[0]
+                    ## I THINK THE NEXT TWO LINES ARE SLOWING DOWN THE CODE ##
+                    #Find the start and end timestamp of the peak
+                    left_ips = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'left_ips'].iloc[0]
+                    right_ips = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'right_ips'].iloc[0]
+                    #left_ips = pd.Timestamp(peak_data.loc[peak_data['rel_height'] == rel_height_row, 'left_ips'].values[0])
+                    #right_ips = pd.Timestamp(peak_data.loc[peak_data['rel_height'] == rel_height_row, 'right_ips'].values[0])
 
-                #Pull the thermal call values associated with that range
-                data = thermal_call_data.iloc[:,0].loc[left_ips:right_ips]
+                    #Pull the thermal call values associated with that range
+                    data = thermal_call_data.iloc[:,0].loc[left_ips:right_ips]
 
-                #Take the integral I used scipy but np.trapz might be more efficient (although less accurate according to the web)
-                # area_under_curve = np.trapz(data.values) / 12
-                area_under_curve = integrate.simpson(data.values) / 12
+                    #Take the integral I used scipy but np.trapz might be more efficient (although less accurate according to the web)
+                    #area_under_curve = np.trapz(data.values) / 12
+                    area_under_curve = integrate.simpson(data.values) / self.resolution_interval
 
-                #Calculate the width
-                width = (right_ips - left_ips).total_seconds() / 60 / 60
+                    #Calculate the width
+                    width = (right_ips - left_ips).total_seconds() / 60 / 60
 
-                # Get area difference height
-                height_area_to_subtract = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'width_height'].iloc[0]
+                    # Get area difference height
+                    height_area_to_subtract = peak_data.loc[peak_data['rel_height'] == rel_height_row, 'width_height'].iloc[0]
 
-                #If negative???? do we need this
-                #if height_area_to_subtract < 0:
-                #    height_area_to_subtract = height_area_to_subtract * -1
+                    #If negative???? do we need this
+                    #if height_area_to_subtract < 0:
+                    #    height_area_to_subtract = height_area_to_subtract * -1
 
-                #Calc the area under the peak to subtract
-                lower_area = width * height_area_to_subtract
+                    #Calc the area under the peak to subtract
+                    lower_area = width * height_area_to_subtract
 
-                #Calculate the peak and add to list
-                peak_area = area_under_curve - lower_area
+                    #Calculate the peak and add to list
+                    peak_area = area_under_curve - lower_area
+
+                    if peak_area >= daily_duration_requirement:
+                        energy_limit_flag = False
+
+                else:
+                    peak_area = np.NAN
+
                 peak_areas.append(peak_area)
 
             # peak_width_data["peak_areas"] = peak_areas
             peak_data.loc[:, "peak_areas"] = peak_areas
             peak_data_with_area = pd.concat([peak_data_with_area, peak_data])
 
+        peak_data_with_area = peak_data_with_area.loc[peak_data_with_area["peak_areas"] >= 0]  #get rid of negative noise and NAs
         return peak_data_with_area
 
-    def select_peaks(self,peak_data_with_area, thermal_call_data, discharge_duration_requirements):
+    def select_peaks(self,peak_data_with_area, thermal_call_data, duration_requirements):
 
         def create_sum_matrix(arrays):
             if len(arrays) == 0:
@@ -412,15 +421,14 @@ class battery_model:
             peak_prominences = peak_prominences.sort_values(ascending=False)
             top_two_prominence_peaks = peak_prominences[:2]
 
-            # If daily duration rqrmt was not provided pull it from the input data and average for the day
-            daily_duration = discharge_duration_requirements.loc[date,"daily_duration_requirement"]
+            # Pull duration requirement
+            daily_duration = duration_requirements.loc[date,"daily_duration_requirement"]
 
             # Create matrix of all combinations of peak areas
             unique_peak_volumes = []
 
             for peak in top_two_prominence_peaks.index:
                 unique_peak_volume = np.array(daily_peaks.loc[daily_peaks.index == peak]["peak_areas"])
-                unique_peak_volume = unique_peak_volume[unique_peak_volume >= 0] #get rid of negatives at the extremes might be a rounding issue
                 unique_peak_volumes.append(unique_peak_volume)
 
             #Get rid of negative artifacts might be a rounding issue
@@ -437,27 +445,43 @@ class battery_model:
 
                 # Step 2: Create a mask to filter divide_matrix where sum matrix exceeds the daily duration
                 mask = sum_matrix < daily_duration
+                filtered_sum_matrix = np.where(mask, sum_matrix, np.nan)
                 filtered_divide_matrix = np.where(mask, divide_matrix, np.nan)
 
                 # Step 3: Find the cell in the filtered_divide_matrix that is closest to the prominence_ratio
                 # IF THERE ARE ANY PEAKS THAT MEET CRITERIA CONTINUE
                 if np.any(~np.isnan(filtered_divide_matrix)):
 
+                    # METHOD 1 strictly picks the highest value
+                    #Calculate the value difference between the prominence ratio and divide matrix
                     closest_index = np.nanargmin(np.abs(filtered_divide_matrix - prominence_ratio))
-
                     # Convert the flat index to a 2D index
                     closest_position = np.unravel_index(closest_index, filtered_divide_matrix.shape)
-
-                    # Get the value from matrix2 that is closest to 0.5
+                    # Get the value from matrix2 that is closest to prominence_ratio
                     closest_value = filtered_divide_matrix[closest_position]
-
                     # Step 4: Retrieve the values from arr1 and arr2 using the closest_position
                     value_from_arr1 = unique_peak_volumes[0][closest_position[0]]
                     value_from_arr2 = unique_peak_volumes[1][closest_position[1]]
-
                     peak_1_info = daily_peaks.loc[daily_peaks['peak_areas'] == value_from_arr1]
                     peak_2_info = daily_peaks.loc[daily_peaks['peak_areas'] == value_from_arr2]
 
+
+                    """
+                    #METHOD 2 balances ratio and size by taking top 3 closest matches and taking highest
+                    n=3
+                    combined_diff = np.abs(filtered_divide_matrix - prominence_ratio)
+                    flat_combined_diff = combined_diff.flatten()
+                    valid_indices = np.where(~np.isnan(flat_combined_diff))[0]
+                    sorted_indices = valid_indices[np.argsort(flat_combined_diff[valid_indices])[:n]]
+                    closest_positions = [np.unravel_index(index, filtered_divide_matrix.shape) for index in sorted_indices]
+                    values = [filtered_sum_matrix[pos] for pos in closest_positions]
+                    largest_value_index = np.argmax(values)
+                    closest_position = closest_positions[largest_value_index]
+                    value_from_arr1 = unique_peak_volumes[0][closest_position[0]]
+                    value_from_arr2 = unique_peak_volumes[1][closest_position[1]]
+                    peak_1_info = daily_peaks.loc[daily_peaks['peak_areas'] == value_from_arr1]
+                    peak_2_info = daily_peaks.loc[daily_peaks['peak_areas'] == value_from_arr2]
+                    """
                     peak_1_height = peak_1_info["width_height"][0]
                     peak_2_height = peak_2_info["width_height"][0]
 
@@ -506,138 +530,143 @@ class battery_model:
 
     def runner(self):
 
-        ############# PREPARE DATA #############
+        # Pull all input data
+        self.Extract_Merge()
 
-        #Pull all input data
-        self.load_and_combine_all_data()
-
-        #upscale to X minute so that we get better results from scipy peak widths fuction
+        # upscale to X minute so that we get better results from scipy peak widths fuction
         upscaled_data = self.input_data.resample(self.resolution).interpolate(method='linear')
-        upscaled_data["inversed_thermal_call"] = upscaled_data["thermal_call"]*-1 + 1000 #### 100 is a hack and needs to be replaced
-        discharging_thermal_call_signal = upscaled_data[["thermal_call"]]
-        charging_thermal_call_signal = upscaled_data[["inversed_thermal_call"]]
+
+        #Prepare the charging and discharging signals, ensuring no values are negative
+        upscaled_data["inversed_thermal_call"] = upscaled_data["thermal_call"] * -1
+        discharging_thermal_call_signal = self.ensure_no_negatives(upscaled_data[["thermal_call"]])
+        charging_thermal_call_signal = self.ensure_no_negatives(upscaled_data[["inversed_thermal_call"]])
 
         ############# CALCULATE DISCHARGING DATA #############
 
-        #Find peaks and return information about them
+        # Find peaks and return information about them
         peak_data = self.find_peaks(discharging_thermal_call_signal)
         logger.info(f'Found discharging peak possibilities')
 
-        #Prepare max power requirements
+        # Prepare max power requirements
         power_requirements = self.input_data.groupby("date")[["arb_bess_capacity"]].mean()
 
-        #Find area for each peak possibility
-        peak_integrals = self.integrate_peaks(peak_data, discharging_thermal_call_signal,power_requirements)
-        logger.info(f'Found discharging peak possibility areas')
-
-        #Prepare duration requirements
+        # Prepare duration requirements
         discharge_duration_requirements = self.input_data.groupby("date")[["arb_bess_gwh"]].mean()
         discharge_duration_requirements.columns = ["daily_duration_requirement"]
 
-        #Select areas that fit requirements
-        battery_discharge = self.select_peaks(peak_integrals, discharging_thermal_call_signal,discharge_duration_requirements)
+        # Find area for each peak possibility
+        peak_integrals = self.integrate_peaks(peak_data, discharging_thermal_call_signal, power_requirements, discharge_duration_requirements)
+        logger.info(f'Found discharging peak possibility areas')
+
+        # Select areas that fit requirements
+        battery_discharge = self.select_peaks(peak_integrals, discharging_thermal_call_signal,
+                                              discharge_duration_requirements)
         logger.info(f'Finished modeling BESS discharging for {self.ISO}')
 
         ############# CALCULATE CHARGING DATA #############
 
-        #Find peaks and return information about them
+        # Find peaks and return information about them
         peak_data = self.find_peaks(charging_thermal_call_signal)
         logger.info(f'Found charging peak possibilities')
 
-        #Find area for each peak possibility, power requirements are the same
-        peak_integrals = self.integrate_peaks(peak_data, charging_thermal_call_signal, power_requirements)
-        logger.info(f'Found charging peak possibility areas')
-
-        #Prepare duration requirements for charging to match discharging + X round trip efficiency
+        # Prepare duration requirements for charging to match discharging + X round trip efficiency
         charge_duration_requirements = battery_discharge.copy()
         charge_duration_requirements["date"] = charge_duration_requirements.index.date
         charge_duration_requirements = charge_duration_requirements.groupby("date").sum()
         charge_duration_requirements.columns = ["daily_duration_requirement"]
-        charge_duration_requirements["daily_duration_requirement"] = charge_duration_requirements["daily_duration_requirement"]*(1 + self.round_trip_losses_percentage)
+        charge_duration_requirements["daily_duration_requirement"] = charge_duration_requirements[
+                                                                         "daily_duration_requirement"] * (
+                                                                                 1 + self.round_trip_losses_percentage)
 
-        #Select areas that fit requirements, multiply by negative 1 so that it is the right sign
+        # Find area for each peak possibility, power requirements are the same
+        peak_integrals = self.integrate_peaks(peak_data, charging_thermal_call_signal, power_requirements,charge_duration_requirements)
+        logger.info(f'Found charging peak possibility areas')
+
+
+
+        # Select areas that fit requirements, multiply by negative 1 so that it is the right sign
         battery_charge = -self.select_peaks(peak_integrals, charging_thermal_call_signal, charge_duration_requirements)
         logger.info(f'Finished modeling BESS charging for {self.ISO}')
         ############# CLEAN DATA AND RETURN #############
 
-        #Net charging and discharging to one net dataseries
+        # Net charging and discharging to one net dataseries
         net_battery_output = battery_charge + battery_discharge
+        net_battery_output.columns = ["batteries"]
 
-        #Add actual battery gen for comparison, can drop in the PROD version
-        net_battery_output = net_battery_output.join(self.input_data["actual_battery_gen"])
+        # Add actual battery gen for comparison, can drop in the PROD version
+        #net_battery_output = net_battery_output.join(self.input_data["actual_battery_gen"])
+
+        #Save to self and load
+        self.net_battery_output = net_battery_output[["batteries"]]
+        self.load_results()
 
         logger.info(f'Finished modeling BESS for {self.ISO}')
 
-        self.net_battery_output =  net_battery_output
+        self.net_battery_output = net_battery_output
+
+    #Write results to SIDs
+    def load_results(self):
+        data = self.net_battery_output
+        for column in data:
+            sid = rf"sid=users\{sj.shooju_api_user_name}\power\models\na_gen\{self.ISO}\generation_forecasts\{column}"
+            static_fields = {}
+            dynamic_fields = {
+                "description": f" Hourly EA net battery output for {self.ISO} in GW"
+            }
+            fields = {**static_fields, **dynamic_fields}
+            job_id = sj.shooju_write(sid=sid, series=data[column], metadata=fields, job=shooju_job,
+                                     remove_others=None)
+        logger.info(fr'just wrote with this job: {os.environ["SHOOJU_SERVER"]}#jobs/{job_id}')
+        logger.info(fr'these sids: {os.environ["SHOOJU_SERVER"]}#explorer?query=meta.job%3D{job_id}')
+        ############# PREPARE DATA #############
 
 net_battery_output = battery_model().net_battery_output
 
 
 ########################## PLOT RESULTS ##########################################
+plot_results = False
 
-net_battery_output["model_state_of_charge"] = net_battery_output["battery_output"].cumsum()*-1
-net_battery_output["model_daily_state_of_charge"] = net_battery_output.groupby(net_battery_output.index.date)['battery_output'].cumsum()*-1
-net_battery_output["residuals"] = net_battery_output["battery_output"] - net_battery_output["actual_battery_gen"]
+if plot_results:
 
-# Specify the date range you want to display
-start_date = '2024-08-16'
-end_date = '2024-08-24'
+    net_battery_output["model_state_of_charge"] = net_battery_output["batteries"].cumsum()*-1
+    net_battery_output["model_daily_state_of_charge"] = net_battery_output.groupby(net_battery_output.index.date)['batteries'].cumsum()*-1
+    #net_battery_output["residuals"] = net_battery_output["batteries"] - net_battery_output["actual_battery_gen"]
 
-from plotly.subplots import make_subplots
-fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Specify the date range you want to display
+    start_date = '2024-08-16'
+    end_date = '2024-08-24'
 
-# Add the main line plot
-fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["battery_output"], mode='lines', name='modeled_net_bess_output',line=dict(color='rgba(0,71,171,1)')), secondary_y=False)
+    from plotly.subplots import make_subplots
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-# Add the battery_cf line plot on the secondary y-axis
-fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["actual_battery_gen"], mode='lines', name='actual_battery_gen',line=dict(color='rgba(5,150,5,1)')), secondary_y=False)
+    # Add the main line plot
+    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["batteries"], mode='lines', name='modeled_net_bess_output',line=dict(color='rgba(0,71,171,1)')), secondary_y=False)
 
-# Add the SOC plot
-fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_state_of_charge"], mode='lines', name='model_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
+    # Add the battery_cf line plot on the secondary y-axis
+    #fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["actual_battery_gen"], mode='lines', name='actual_battery_gen',line=dict(color='rgba(5,150,5,1)')), secondary_y=False)
 
-# Add the SOC plot
-fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_daily_state_of_charge"], mode='lines', name='model_daily_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
+    # Add the SOC plot
+    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_state_of_charge"], mode='lines', name='model_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
 
-
-# Add the battery_cf line plot on the secondary y-axis
-fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["residuals"], mode='lines', name='residuals',line=dict(color='rgba(0,0,0,1)')), secondary_y=False)
-
-# Update layout
-fig.update_layout(title='Battery model vs actuals',
-                  xaxis_title='Datetime',
-                  yaxis_title='GW',
-                  #yaxis2_title='Battery Charge Factor',
-                  xaxis=dict(
-                        range=[start_date, end_date],  # Set the initial date range
-                        type='date'  # Ensure the x-axis is treated as a date axis
-    ),
-                  )
-
-# Show the plot
-fig.show()
+    # Add the SOC plot
+    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_daily_state_of_charge"], mode='lines', name='model_daily_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
 
 
-print("done")
+    # Add the battery_cf line plot on the secondary y-axis
+    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["residuals"], mode='lines', name='residuals',line=dict(color='rgba(0,0,0,1)')), secondary_y=False)
+
+    # Update layout
+    fig.update_layout(title='Battery model vs actuals',
+                      xaxis_title='Datetime',
+                      yaxis_title='GW',
+                      #yaxis2_title='Battery Charge Factor',
+                      xaxis=dict(
+                            range=[start_date, end_date],  # Set the initial date range
+                            type='date'  # Ensure the x-axis is treated as a date axis
+        ),
+                      )
+
+    # Show the plot
+    fig.show()
 
 
-
-
-
-
-
-
-
-
-
-
-############# PREPARE DATA FOR TESTING #############
-# Pull data from xlsx for testing
-# self.input_data.to_excel("hourly_data.xlsx")
-# hourly_data = pd.read_excel("hourly_data.xlsx")
-# hourly_data["index"] = pd.to_datetime(hourly_data["index"])
-# hourly_data.set_index("index", inplace=True)
-# hourly_data["date"] = hourly_data["date"].dt.date
-# self.input_data = hourly_data
-# for testing purposes take a slice of the data to run
-# hourly_data = df[6167:6400] #sep 14-15
-# hourly_data = hourly_data[5543:5800]  # aug peak
