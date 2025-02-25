@@ -27,8 +27,8 @@ class battery_model:
 
     def __init__(self):
         self.ISO = "ERCOT"
-        self.sd = datetime(2024, 1, 1)
-        self.ed = datetime(2024, 12, 31)
+        self.sd = datetime(2024, 8, 1)
+        self.ed = datetime(2024, 8, 31)
         self.resolution = "5min"  #options are "60min", "15min", "5min"
         resolution_to_interval_map = {"60min": 1,"15min": 4,"5min": 12}
         self.resolution_interval = resolution_to_interval_map.get(self.resolution, "String not found")
@@ -207,6 +207,39 @@ class battery_model:
         self.Extract_Merge()
         df = self.input_data
 
+        ############### Plot comparison ###############
+
+        # Specify the date range you want to display
+        start_date = '2024-08-16'
+        end_date = '2024-08-24'
+
+        from plotly.subplots import make_subplots
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        # Add the main line plot
+        fig.add_trace(go.Scatter(x=df.index, y=df["battery_net_output"], mode='lines',
+                                 name='battery_net_output', line=dict(color='rgba(0,71,171,1)')),
+                      secondary_y=False)
+
+        # Add the main line plot
+        fig.add_trace(go.Scatter(x=df.index, y=df["modeled_bess_output"], mode='lines',
+                                 name='modeled_bess_output', line=dict(color='rgba(250,10,10,1)')),
+                      secondary_y=False)
+
+        # Update layout
+        fig.update_layout(title='Battery model vs actuals',
+                          xaxis_title='Datetime',
+                          yaxis_title='GW',
+                          # yaxis2_title='Battery Charge Factor',
+                          xaxis=dict(
+                              range=[start_date, end_date],  # Set the initial date range
+                              type='date'  # Ensure the x-axis is treated as a date axis
+                          ),
+                          )
+
+        # Show the plot
+        fig.show()
+
         ############### Create figure comparing actual daily cyling vs installed capacity ###############
 
         #Find actual battery charging and discharging during modeled peaks
@@ -223,7 +256,17 @@ class battery_model:
         daily_df = daily_df.join(daily_positive_net_output)
         daily_df = daily_df[:-4]
         daily_df = daily_df.dropna()
-        daily_df["losses"] = daily_df["battery_charge"]/daily_df["battery_discharge"]
+
+        daily_df["actual_losses"] = daily_df["battery_charge"]/daily_df["battery_discharge"]
+
+        #Find modeled charging and discharging
+        positive_modeled_net_output = df.loc[df["modeled_bess_output"]>0]
+        daily_positive_modeled_net_output = positive_modeled_net_output.groupby('date')[['modeled_bess_output']].sum()
+        negative_modeled_net_output = df.loc[df["modeled_bess_output"]<0]
+        daily_negative_modeled_net_output = negative_modeled_net_output.groupby('date')[['modeled_bess_output']].sum()
+        daily_negative_losses = daily_negative_modeled_net_output/daily_positive_modeled_net_output
+        daily_negative_losses.columns = ["daily_modeled_losses"]
+        daily_df = daily_df.join(daily_negative_losses)
         daily_df["month"] = pd.to_datetime(daily_df.index).month
 
         df_monthly = df.groupby("month")[["battery_capacity"]].mean().reset_index()
@@ -256,8 +299,8 @@ class battery_model:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
         for month in daily_df["month"].unique():
-            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["losses"],name=f'{month}', marker_color="blue", showlegend=False))
-
+            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["actual_losses"],name=f'{month}', marker_color="blue", showlegend=False))
+            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["daily_modeled_losses"], name=f'{month}', marker_color="red",showlegend=False))
         fig.update_layout(
             title='Compare monthly losses',
             xaxis_title='Month',
@@ -361,41 +404,6 @@ if plot_results:
     net_battery_output["model_daily_state_of_charge"] = net_battery_output.groupby(net_battery_output.index.date)['batteries'].cumsum()*-1
     #net_battery_output["residuals"] = net_battery_output["batteries"] - net_battery_output["actual_battery_gen"]
 
-    # Specify the date range you want to display
-    start_date = '2024-08-16'
-    end_date = '2024-08-24'
 
-    from plotly.subplots import make_subplots
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # Add the main line plot
-    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["batteries"], mode='lines', name='modeled_net_bess_output',line=dict(color='rgba(0,71,171,1)')), secondary_y=False)
-
-    # Add the battery_cf line plot on the secondary y-axis
-    #fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["actual_battery_gen"], mode='lines', name='actual_battery_gen',line=dict(color='rgba(5,150,5,1)')), secondary_y=False)
-
-    # Add the SOC plot
-    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_state_of_charge"], mode='lines', name='model_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
-
-    # Add the SOC plot
-    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["model_daily_state_of_charge"], mode='lines', name='model_daily_state_of_charge',line=dict(color='rgba(150,5,5,1)')), secondary_y=False)
-
-
-    # Add the battery_cf line plot on the secondary y-axis
-    fig.add_trace(go.Scatter(x=net_battery_output.index, y=net_battery_output["residuals"], mode='lines', name='residuals',line=dict(color='rgba(0,0,0,1)')), secondary_y=False)
-
-    # Update layout
-    fig.update_layout(title='Battery model vs actuals',
-                      xaxis_title='Datetime',
-                      yaxis_title='GW',
-                      #yaxis2_title='Battery Charge Factor',
-                      xaxis=dict(
-                            range=[start_date, end_date],  # Set the initial date range
-                            type='date'  # Ensure the x-axis is treated as a date axis
-        ),
-                      )
-
-    # Show the plot
-    fig.show()
 
 
