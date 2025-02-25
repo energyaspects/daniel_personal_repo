@@ -26,8 +26,8 @@ class battery_model:
 
     def __init__(self):
         self.ISO = "ERCOT"
-        self.sd = datetime(2025, 1, 1)
-        self.ed = datetime(2028, 12, 31)
+        self.sd = datetime(2024, 1, 1)
+        self.ed = datetime(2024, 12, 31)
         self.resolution = "5min"  #options are "60min", "15min", "5min"
         resolution_to_interval_map = {"60min": 1,"15min": 4,"5min": 12}
         self.resolution_interval = resolution_to_interval_map.get(self.resolution, "String not found")
@@ -59,20 +59,14 @@ class battery_model:
         return thermal_call
 
     def get_battery_capacity_sid_data(self):
-        #THERE ARE THREE DIFFERENT SERIES TO USE SEE OPTIONS BELOW
 
-        #OPTION 1: PREFERRED - Use na_gen capacity_adj SIDs
-        #sid=teams\power\models\na_gen\CAISO\capacity\fuel\bess
-        #battery_capacity_query = r'=({{sid=teams\power\models\na_gen\ERCOT\capacity_adj\batteries}}/1000)'  # call this thermal call in the future
-        #battery_capacity = sj.sj.get_df(query=net_load_query, series_axis="columns", df=self.sd, dt=self.ed, max_points=-1, fields="series_id")
-
-        #OPTION 2: Pull battery capacity data from hardcoded xlsx sheet that has commercial vs synchronized split
-        battery_capacity = pd.read_excel("2025-01-16 EA ERCOT battery COD forecast.xlsx",header=1)
-        battery_capacity["battery_capacity_cod"] = battery_capacity["battery_capacity_cod"] / 1000
-
-        #OPTION 3: Pull battery capacity data from EIA sids
-        #battery_capacity_query = r"=F.multi_sum(r'sid:(tests\asset\timeseries\power_plant) country_iso=US powerplant_specifics_obj.eia_iso=ERCO asset_subtype_name=Batteries table_level=asset_detail timeseries_type=nameplate_capacity timeseries_status=confirmed NOT asset_detail_status=(cancelled,postponed,planned)',[])/1000"
-        #battery_capacity_data = sj.sj.get_df( query=battery_capacity_query, series_axis="columns", df=date_start, dt=date_finish, max_points=-1, fields="series_id")
+        battery_capacity_query = r'=({{sid=teams\power\models\na_gen\ERCOT\capacity\fuel\bess}}*1000)'
+        battery_capacity = sj.sj.get_df(query=battery_capacity_query, series_axis="columns", df=self.sd, dt=self.ed, max_points=-1, fields="series_id")
+        battery_capacity.index = pd.to_datetime(battery_capacity.index)
+        battery_capacity.index = battery_capacity.index.tz_localize(None)
+        battery_capacity.columns = ["battery_capacity"]
+        battery_capacity["month"] = battery_capacity.index.month
+        battery_capacity["year"] = battery_capacity.index.year
 
         return battery_capacity
 
@@ -90,7 +84,6 @@ class battery_model:
         battery_as_vol_sid = fr'sid=users\daniel.pyrek\power\models\na_gen\{self.ISO}\capacity_adj\battery_ancillary_capacity'
         battery_as_vol = sj.sj.get_df(query=battery_as_vol_sid, series_axis="columns", df=self.sd, dt=self.ed,max_points=-1, fields="series_id")
         battery_as_vol.columns = ["avg_bess_as_vol"]
-        battery_as_vol["avg_bess_as_vol"] = battery_as_vol["avg_bess_as_vol"]/1000
         battery_as_vol['year'] = battery_as_vol.index.year
         battery_as_vol['month'] = battery_as_vol.index.month
 
@@ -129,20 +122,33 @@ class battery_model:
     def get_actual_battery_output_sid_data(self):
         #THIS IS NOT NECESSARY IN THE MODEL BUT USED FOR RESIDUALS, TESTING ETC.
 
+        battery_gen_query = r'''=F.multi_sum(r'sid:ERCOT\60dsced\* source_obj.aspect= ("Telemetered Net Output") source_obj.resource_type="PWRSTR"',operators=("@localize:America/Chicago@A:h"),key_fields=[])'''
+        battery_gen = sj.sj.get_df(query=battery_gen_query, series_axis="columns", df=self.sd, dt=self.ed,max_points=-1, fields="series_id")
+        battery_gen.index = battery_gen.index.tz_localize(None)
+        battery_gen.columns = ["battery_gen"]
+
+        battery_charge_query = r'=({{sid=teams\power\ercot\gen_mix\WSL}}*1000)@A:h@localize:America/Chicago'
+        battery_charge = sj.sj.get_df(query=battery_charge_query, series_axis="columns", df=self.sd, dt=self.ed, max_points=-1,fields="series_id")
+        battery_charge.index = battery_charge.index.tz_localize(None)
+        battery_charge.columns = ["battery_charge"]
+
+        battery_data = battery_charge.join(battery_gen)
+        battery_data["battery_net_output"] = battery_data["battery_charge"] + battery_data["battery_gen"]
+        battery_data.reset_index(inplace=True)
+
+        """
         #Define the region
         if self.ISO == "ERCOT":
-             battery_gen_query = r'=({{sid=teams\power\ercot\gen_mix\WSL}} + {{sid=teams\power\ercot\gen_mix\other}})@A:h@localize:America/Chicago'
-
-        if self.ISO == "CAISO":
-            battery_gen_query = r'={{sid=teams\power\caiso\gen_mix_new\batteries}}/1000@A:h@localize:America/Los_Angeles'
+             battery_gen_query = r'=(({{sid=teams\power\ercot\gen_mix\WSL}} + {{sid=teams\power\ercot\gen_mix\other}})*1000)@A:h@localize:America/Chicago'
 
         #Pull the data
         battery_gen_data = sj.sj.get_df(query=battery_gen_query, series_axis="columns", df=self.sd, dt=self.ed, max_points=-1,fields="series_id")
         battery_gen_data.columns = ["actual_battery_gen"]
         battery_gen_data.index = battery_gen_data.index.tz_localize(None)
         battery_gen_data.reset_index(inplace=True)
+        """
 
-        return battery_gen_data
+        return battery_data
 
     #Helper functions that convert ordinal times to datetime and vice versa
     def DatetimeToOrdinal(self,dt):
@@ -193,15 +199,13 @@ class battery_model:
         df = thermal_call_data.merge(battery_capacity_data)
         df = df.merge(battery_duration_data)
         df = df.merge(battery_ancillary_data)
-        #df = df.merge(actual_battery_output_data)
+        df = df.merge(actual_battery_output_data)
         logger.info(f'Merged all input data')
 
         #Calculate additional columns
-        df["battery_gwh"] = df['duration'] * df['battery_capacity_cod'] #calculate raw battery gwh
-        df["arb_bess_capacity"] = df["battery_capacity_cod"] - df["avg_bess_as_vol"] #calculate battery capacity able to arb
+        df["battery_gwh"] = df['duration'] * df['battery_capacity'] #calculate raw battery gwh
+        df["arb_bess_capacity"] = df["battery_capacity"] - df["avg_bess_as_vol"] #calculate battery capacity able to arb
         df["arb_bess_gwh"] = df["battery_gwh"] - df["avg_bess_as_vol"] * df["duration"] #calculate battery arb gwh
-        #df["total_battery_cf"] = df["actual_battery_gen"] / df["battery_capacity_cod"] #calculate total battery cf
-        #df["arb_battery_cf"] = df["actual_battery_gen"] / df["arb_bess_capacity"] #calculate arb battery cf
         df['thermal_call_ramp'] = df['thermal_call'].diff() #calculate ramping - not needed but could be used in future
 
         #Clean up data and save df to self
@@ -582,8 +586,6 @@ class battery_model:
         peak_integrals = self.integrate_peaks(peak_data, charging_thermal_call_signal, power_requirements,charge_duration_requirements)
         logger.info(f'Found charging peak possibility areas')
 
-
-
         # Select areas that fit requirements, multiply by negative 1 so that it is the right sign
         battery_charge = -self.select_peaks(peak_integrals, charging_thermal_call_signal, charge_duration_requirements)
         logger.info(f'Finished modeling BESS charging for {self.ISO}')
@@ -611,7 +613,7 @@ class battery_model:
             sid = rf"sid=users\{sj.shooju_api_user_name}\power\models\na_gen\{self.ISO}\generation_forecasts\{column}"
             static_fields = {}
             dynamic_fields = {
-                "description": f" Hourly EA net battery output for {self.ISO} in GW"
+                "description": f" Hourly EA net battery output for {self.ISO} in MW"
             }
             fields = {**static_fields, **dynamic_fields}
             job_id = sj.shooju_write(sid=sid, series=data[column], metadata=fields, job=shooju_job,
