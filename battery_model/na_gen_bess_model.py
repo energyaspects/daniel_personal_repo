@@ -26,8 +26,8 @@ class battery_model:
 
     def __init__(self):
         self.ISO = "ERCOT"
-        self.sd = datetime(2024, 8, 1)
-        self.ed = datetime(2024, 8, 31)
+        self.sd = datetime(2024, 1, 1)
+        self.ed = datetime(2024, 12, 31)
         self.resolution = "5min"  #options are "60min", "15min", "5min" Do not change for now, could be tweaked to improve performance
         resolution_to_interval_map = {"60min": 1,"15min": 4,"5min": 12}
         self.resolution_interval = resolution_to_interval_map.get(self.resolution, "String not found")
@@ -484,11 +484,14 @@ class battery_model:
                     peak_2_bess = thermal_call_data.iloc[:,0].loc[
                                   peak_2_info["left_ips"][0]:peak_2_info["right_ips"][0]]  # get thermal call shape for range
 
+
+                    #I FOUND A BUG HERE THAT NEEDS INVESTIGATING, IT LOOKS LIKE THE DATA PULLED BELOW DOES NOT TOTAL TO THE EXPECTED AREA.
+                    #I TRIED USING THE TWO LINES BELOW BUT IT SEEMS LIKE IT COULD BE AN ISSUE WITH THE RANGES
                     peak_1_height_selected = np.min([np.min(peak_1_bess),peak_1_height])
-                    peak_1_height_selected = np.min([np.min(peak_2_bess),peak_2_height])
+                    peak_2_height_selected = np.min([np.min(peak_2_bess),peak_2_height])
 
                     peak_1_bess = peak_1_bess - peak_1_height_selected  # adjust for height
-                    peak_2_bess = peak_2_bess - peak_1_height_selected  # adjust for height
+                    peak_2_bess = peak_2_bess - peak_2_height_selected  # adjust for height
 
                     battery_output = pd.concat([battery_output, peak_1_bess])
                     battery_output = pd.concat([battery_output, peak_2_bess])
