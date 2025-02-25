@@ -207,6 +207,68 @@ class battery_model:
         self.Extract_Merge()
         df = self.input_data
 
+        ############### Create figure comparing actual daily cyling vs installed capacity ###############
+
+        #Find actual battery charging and discharging during modeled peaks
+        positive_net_output = df.loc[df["battery_net_output"]>0]
+        daily_positive_net_output = positive_net_output.groupby('date')[['battery_net_output']].sum()
+
+        daily_discharge_volume = df.groupby('date')[['battery_gen']].sum()
+        daily_discharge_volume.columns = ["battery_discharge"]
+
+        daily_charge_volume = df.groupby('date')[['battery_charge']].sum()
+        daily_charge_volume.columns = ["battery_charge"]
+
+        daily_df = daily_discharge_volume.join(daily_charge_volume)
+        daily_df = daily_df.join(daily_positive_net_output)
+        daily_df = daily_df[:-4]
+        daily_df = daily_df.dropna()
+        daily_df["losses"] = daily_df["battery_charge"]/daily_df["battery_discharge"]
+        daily_df["month"] = pd.to_datetime(daily_df.index).month
+
+        df_monthly = df.groupby("month")[["battery_capacity"]].mean().reset_index()
+
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        # Add box plots for each group
+
+        for month in daily_df["month"].unique():
+            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["battery_discharge"],name=f'{month}', marker_color="blue", showlegend=False))
+            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["battery_net_output"], name=f'{month}',marker_color="red", showlegend=False))
+
+        fig.add_trace(go.Scatter(x=df_monthly["month"], y=df_monthly["battery_capacity"], mode='lines+markers', name='battery_capacity',marker_color="black"))
+
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color="blue"), name="battery_discharge"))
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color="red"), name="battery_net_output"))
+
+
+        # Update layout
+        fig.update_layout(
+            title='Compare actual daily cycling vs installed capacity, losses',
+            xaxis_title='Month',
+            yaxis_title='MW',
+            xaxis=dict(type='category')  # Ensure the x-axis is treated as categorical
+        )
+        # Show the plot
+        fig.show()
+
+        ############### Create figure for losses ###############
+
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        for month in daily_df["month"].unique():
+            fig.add_trace(go.Box(y=daily_df.loc[(daily_df["month"] == month)]["losses"],name=f'{month}', marker_color="blue", showlegend=False))
+
+        fig.update_layout(
+            title='Compare monthly losses',
+            xaxis_title='Month',
+            yaxis_title='%',
+            xaxis=dict(type='category')  # Ensure the x-axis is treated as categorical
+        )
+
+        fig.show()
+
+        ############### Create figure comparing actual vs daily cyling for only peak ranges ###############
+
         #Find actual battery charging and discharging during modeled peaks
         discharge_peaks = df.loc[df["modeled_bess_output"]>0]
         daily_discharge_volume = discharge_peaks.groupby('date')[['battery_gen']].sum()
@@ -250,7 +312,7 @@ class battery_model:
         df_combined = pd.concat([df1, df2])
         df_combined["value"] = np.round(df_combined["value"])
 
-        df_monthly = daily_df.groupby("month")[["arb_bess_gwh"]].mean().reset_index()
+        df_monthly = daily_df.groupby("month")[["arb_bess_gwh","battery_gwh"]].mean().reset_index()
 
         fig = go.Figure()
         # Add box plots for each group
@@ -270,7 +332,8 @@ class battery_model:
             months = months+1
 
 
-        fig.add_trace(go.Scatter(x=df_monthly["month"], y=df_monthly["arb_bess_gwh"], mode='lines+markers', name='Line Series',marker_color="black"))
+        fig.add_trace(go.Scatter(x=df_monthly["month"], y=df_monthly["arb_bess_gwh"], mode='lines+markers', name='arb_bess_gwh',marker_color="black"))
+        fig.add_trace(go.Scatter(x=df_monthly["month"], y=df_monthly["battery_gwh"], mode='lines+markers', name='total_battery_gwh',marker_color="purple"))
 
         fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color=colors[0]), name=df1_name))
         fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color=colors[1]), name=df2_name))
@@ -279,7 +342,7 @@ class battery_model:
         fig.update_layout(
             title='Compare modeled and actual 2024 daily discharge sum for modeled peaks',
             xaxis_title='Month',
-            yaxis_title='Value',
+            yaxis_title='MW',
             xaxis=dict(type='category')  # Ensure the x-axis is treated as categorical
         )
         # Show the plot
